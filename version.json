@@ -1,5 +1,5 @@
 {
-  "version": "3.8",
+  "version": "3.9",
   "url": "https://github.com/kyle004/KysCanvas/releases/latest",
-  "notes": "Fix Done view: completed tasks now show regardless of timeframe/course filter, and past-due items (last 60 days) are included so you can still see what you checked off."
+  "notes": "Hotfix: paginated planner fetch was throwing on page 2 (Canvas returns 404 for empty pages), which wiped all tasks/courses. Loop now breaks cleanly and keeps collected items."
 }

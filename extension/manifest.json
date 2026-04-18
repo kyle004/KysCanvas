@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ky's Canvas",
-  "version": "3.8",
+  "version": "3.9",
   "description": "Cleans up Canvas UI, adds global API fetching, persistent tracking, and native-looking controls.",
   "permissions": ["storage", "alarms"],
   "host_permissions": [

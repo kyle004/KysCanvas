@@ -97,36 +97,56 @@
     }
 
     async function fetchGlobalAssignments() {
+        // Fetch a window that includes the recent past too, so items that
+        // were due before today (but are still worth showing in Overdue /
+        // Done / history) are part of globalTasks.
+        const past = new Date();
+        past.setDate(past.getDate() - 60);
+        const startStr = past.toISOString();
+        const future = new Date();
+        future.setDate(future.getDate() + 120);
+        const endStr = future.toISOString();
+
+        // Try paginating to collect all items in the window. Be defensive:
+        // if any page fails (Canvas can 404 on out-of-range pages instead of
+        // returning an empty array), KEEP whatever we already collected
+        // rather than throwing the whole result away.
+        let items = [];
         try {
-            // Fetch a window that includes the recent past too, so items that
-            // were due before today (but are still worth showing in Overdue /
-            // Done / history) are part of globalTasks.
-            const past = new Date();
-            past.setDate(past.getDate() - 60);
-            const startStr = past.toISOString();
-            const future = new Date();
-            future.setDate(future.getDate() + 120);
-            const endStr = future.toISOString();
-            // Planner API caps results per page; paginate to collect all items
-            // in the 180-day window.
-            let items = [];
             let page = 1;
             while (true) {
-                const response = await fetch(`/api/v1/planner/items?start_date=${startStr}&end_date=${endStr}&per_page=100&page=${page}`);
-                if (!response.ok) throw new Error("API Fetch Failed");
-                const batch = await response.json();
-                if (!batch.length) break;
+                let response;
+                try {
+                    response = await fetch(`/api/v1/planner/items?start_date=${startStr}&end_date=${endStr}&per_page=100&page=${page}`);
+                } catch (netErr) {
+                    console.warn("[Ky's Canvas] planner page", page, "network error", netErr);
+                    break;
+                }
+                if (!response.ok) {
+                    // 404 / 401 on a later page just means "no more data"
+                    if (page === 1) {
+                        console.error("[Ky's Canvas] planner page 1 failed:", response.status);
+                    }
+                    break;
+                }
+                let batch;
+                try { batch = await response.json(); }
+                catch (e) { console.warn("[Ky's Canvas] planner JSON parse error", e); break; }
+                if (!Array.isArray(batch) || batch.length === 0) break;
                 items = items.concat(batch);
                 if (batch.length < 100) break;
                 page++;
                 if (page > 10) break; // safety
             }
-            const virtualClinicals = await fetchClinicalVirtualItems();
-            return [...items, ...virtualClinicals];
         } catch (error) {
-            console.error("Canvas UI Enhancer API Error:", error);
-            return [];
+            console.error("[Ky's Canvas] planner fetch error:", error);
         }
+
+        let virtualClinicals = [];
+        try { virtualClinicals = await fetchClinicalVirtualItems(); }
+        catch (e) { console.warn("[Ky's Canvas] clinical virtuals failed", e); }
+
+        return [...items, ...virtualClinicals];
     }
 
     // Returns cached list of active courses, fetched lazily.
