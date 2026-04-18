@@ -1,5 +1,5 @@
 {
-  "version": "3.9",
+  "version": "4.0",
   "url": "https://github.com/kyle004/KysCanvas/releases/latest",
-  "notes": "Hotfix: paginated planner fetch was throwing on page 2 (Canvas returns 404 for empty pages), which wiped all tasks/courses. Loop now breaks cleanly and keeps collected items."
+  "notes": "Clinical dates now use Canvas modules API. Shows one entry per 'Clinical Day N' module (🩺 Clinical Day 1..N) spread across 21 days from your start date. Works for both Med-Surg and Psych Clinical. New 'Estimate dates' toggle in Clinical Schedules — turn off to hide the estimates."
 }

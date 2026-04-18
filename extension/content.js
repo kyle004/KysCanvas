@@ -64,7 +64,8 @@
         status: 'incomplete',
         timeframe: 'this_week',
         sort: 'date_asc',
-        clinicalSchedules: {} // keyed by course id: { startDate: 'YYYY-MM-DD' }
+        clinicalSchedules: {}, // keyed by course id: { startDate: 'YYYY-MM-DD' }
+        clinicalEstimateDates: true // when true, synthesize virtual dates for Clinical Day modules
     };
 
     let userSettings = JSON.parse(localStorage.getItem('tm_canvas_settings')) || { ...defaultSettings };
@@ -164,19 +165,20 @@
         }
     }
 
-    // For each clinical course the user has scheduled, pull undated assignments
-    // and assign virtual dates evenly across 21 days starting at the user-provided
-    // start date. Two modes:
-    //   1) "Clinical Day N" pattern matches — preferred (we know the day order).
-    //      Duplicates by day number are deduped (Canvas sometimes returns the same
-    //      Clinical Day N quiz under two assignment IDs).
-    //   2) Fallback: if no "Clinical Day N" items exist, use ALL undated
-    //      assignments in the course (keeps stable order via assignment ID).
-    //      This covers courses like Psych Clinical where work is named differently
-    //      (Typhon Time Logs, Video Case Studies, etc.).
+    // For each clinical course the user has scheduled, look at its MODULES
+    // (not assignments). Modules named "Clinical Day N" represent each clinical
+    // session. We emit ONE virtual entry per matched module, labeled
+    // "🩺 Clinical Day N", with a synthesized date spread across a 21-day
+    // window starting at the user-provided start date. The link goes to the
+    // module itself, so clicking shows all underlying quizzes/resources.
+    //
+    // Governed by the clinicalEstimateDates toggle. When false, no virtual
+    // entries are produced and the user just sees Canvas's native view.
     async function fetchClinicalVirtualItems() {
         const schedules = userSettings.clinicalSchedules || {};
         if (!Object.keys(schedules).length) return [];
+        if (userSettings.clinicalEstimateDates === false) return [];
+
         const courses = await getActiveCourses();
 
         const results = [];
@@ -184,67 +186,60 @@
             const sched = schedules[course.id];
             if (!sched || !sched.startDate) continue;
 
-            let assignments;
+            let modules;
             try {
-                const r = await fetch(`/api/v1/courses/${course.id}/assignments?per_page=100`);
+                const r = await fetch(`/api/v1/courses/${course.id}/modules?include[]=items&per_page=100`);
                 if (!r.ok) continue;
-                assignments = await r.json();
+                modules = await r.json();
             } catch (_) { continue; }
 
-            // First pass: try "Clinical Day N" pattern matches
-            const clinicalDaysMap = new Map(); // dayNum -> assignment (dedupe)
-            assignments.forEach(a => {
-                if (a.due_at) return;
-                const m = (a.name || '').match(/clinical\s*day\s*(\d+)/i);
-                if (!m) return;
-                const dayNum = parseInt(m[1], 10);
-                // Dedupe: prefer the assignment with the lower ID (the original)
-                const existing = clinicalDaysMap.get(dayNum);
-                if (!existing || a.id < existing.id) {
-                    clinicalDaysMap.set(dayNum, a);
-                }
+            // Find modules whose NAME matches "Clinical Day N"
+            const clinicalDays = [];
+            modules.forEach(m => {
+                const mm = (m.name || '').match(/^\s*clinical\s*day\s*(\d+)\s*$/i);
+                if (!mm) return;
+                clinicalDays.push({ dayNum: parseInt(mm[1], 10), module: m });
             });
 
-            let scheduled = []; // [{label, assignment}]
+            if (!clinicalDays.length) continue;
 
-            if (clinicalDaysMap.size) {
-                // Mode 1: "Clinical Day N" — preferred
-                const sortedDays = [...clinicalDaysMap.keys()].sort((a, b) => a - b);
-                scheduled = sortedDays.map(dayNum => ({
-                    assignment: clinicalDaysMap.get(dayNum)
-                }));
-            } else {
-                // Mode 2 (fallback): no "Clinical Day N" items — use ALL undated
-                // assignments for this course, in stable assignment-ID order.
-                scheduled = assignments
-                    .filter(a => !a.due_at)
-                    .sort((x, y) => x.id - y.id)
-                    .map(a => ({ assignment: a }));
-            }
-
-            if (!scheduled.length) continue;
+            clinicalDays.sort((a, b) => a.dayNum - b.dayNum);
 
             // Spread across a 21-day window starting at startDate
             const start = new Date(sched.startDate + 'T12:00:00');
-            const count = scheduled.length;
+            const count = clinicalDays.length;
             const spanDays = 20; // 21-day window = 0..20
 
-            scheduled.forEach((cd, idx) => {
+            clinicalDays.forEach((cd, idx) => {
                 const offset = count === 1 ? 0 : Math.round((idx * spanDays) / (count - 1));
                 const virtualDate = new Date(start);
                 virtualDate.setDate(virtualDate.getDate() + offset);
 
+                // Link: module page if possible, otherwise first quiz/assignment inside
+                let link = `/courses/${course.id}/modules#module_${cd.module.id}`;
+                const firstGraded = (cd.module.items || [])
+                    .find(it => it.type === 'Quiz' || it.type === 'Assignment');
+                if (firstGraded?.html_url) link = firstGraded.html_url;
+
+                // Points: sum from any Quiz/Assignment items in the module if the
+                // Canvas module response happens to include point info.
+                let pts = null;
+                const points = (cd.module.items || [])
+                    .map(it => it.content_details?.points_possible)
+                    .filter(p => typeof p === 'number');
+                if (points.length) pts = points.reduce((a, b) => a + b, 0);
+
                 results.push({
-                    // Shape like a planner item so downstream code works unchanged
                     plannable_type: 'assignment',
                     plannable_date: virtualDate.toISOString(),
                     plannable: {
-                        title: cd.assignment.name + '  (estimated)',
-                        points_possible: cd.assignment.points_possible
+                        title: `Clinical Day ${cd.dayNum}`,
+                        points_possible: pts
                     },
-                    html_url: cd.assignment.html_url,
+                    html_url: link,
                     context_name: course.name,
-                    _virtual_clinical: true
+                    _virtual_clinical: true,
+                    _clinical_day: cd.dayNum
                 });
             });
         }
@@ -1193,7 +1188,17 @@
         }
         section.style.display = 'block';
 
-        let html = '';
+        // Master toggle for the estimate-dates feature
+        const estOn = userSettings.clinicalEstimateDates !== false;
+        let html = `
+            <div class="tm-toggle-row" style="margin-bottom:6px;">
+                <label for="tm-chk-estimate" style="font-size:11px;">Estimate dates</label>
+                <label class="tm-toggle-switch">
+                    <input type="checkbox" id="tm-chk-estimate" ${estOn ? 'checked' : ''}>
+                    <span class="tm-slider"></span>
+                </label>
+            </div>
+        `;
         clinicalCourses.forEach(c => {
             const sched = (userSettings.clinicalSchedules || {})[c.id] || {};
             const shortName = (c.name || '').trim().substring(0, 28);
@@ -1204,10 +1209,10 @@
                 </div>
             `;
         });
-        if (!html) html = '<div class="tm-clinical-empty">No clinical courses detected.</div>';
+        if (!clinicalCourses.length) html = '<div class="tm-clinical-empty">No clinical courses detected.</div>';
         body.innerHTML = html;
 
-        // Bind inputs
+        // Bind date inputs
         body.querySelectorAll('input[type="date"]').forEach(input => {
             input.addEventListener('change', (e) => {
                 const courseId = e.target.getAttribute('data-course-id');
@@ -1220,6 +1225,15 @@
                 saveSettings();
             });
         });
+
+        // Bind the estimate-dates toggle
+        const estBox = document.getElementById('tm-chk-estimate');
+        if (estBox) {
+            estBox.addEventListener('change', (e) => {
+                userSettings.clinicalEstimateDates = e.target.checked;
+                saveSettings();
+            });
+        }
     }
 
     // Show toast if the background service worker has flagged an update
