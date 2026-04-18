@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Ky's Canvas",
+  "version": "3.6",
+  "description": "Cleans up Canvas UI, adds global API fetching, persistent tracking, and native-looking controls.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "https://raw.githubusercontent.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Ky's Canvas"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.instructure.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "kys-canvas@local.extension",
+      "strict_min_version": "109.0"
+    }
+  }
+}
