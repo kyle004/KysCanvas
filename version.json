@@ -1,5 +1,5 @@
 {
-  "version": "3.6",
+  "version": "3.8",
   "url": "https://github.com/kyle004/KysCanvas/releases/latest",
-  "notes": "Sunday-anchored week view, overdue filter, day headers, clinical schedules, auto-update check."
+  "notes": "Fix Done view: completed tasks now show regardless of timeframe/course filter, and past-due items (last 60 days) are included so you can still see what you checked off."
 }

@@ -98,14 +98,29 @@
 
     async function fetchGlobalAssignments() {
         try {
-            const now = new Date();
-            const startStr = now.toISOString();
+            // Fetch a window that includes the recent past too, so items that
+            // were due before today (but are still worth showing in Overdue /
+            // Done / history) are part of globalTasks.
+            const past = new Date();
+            past.setDate(past.getDate() - 60);
+            const startStr = past.toISOString();
             const future = new Date();
             future.setDate(future.getDate() + 120);
             const endStr = future.toISOString();
-            const response = await fetch(`/api/v1/planner/items?start_date=${startStr}&end_date=${endStr}&per_page=100`);
-            if (!response.ok) throw new Error("API Fetch Failed");
-            const items = await response.json();
+            // Planner API caps results per page; paginate to collect all items
+            // in the 180-day window.
+            let items = [];
+            let page = 1;
+            while (true) {
+                const response = await fetch(`/api/v1/planner/items?start_date=${startStr}&end_date=${endStr}&per_page=100&page=${page}`);
+                if (!response.ok) throw new Error("API Fetch Failed");
+                const batch = await response.json();
+                if (!batch.length) break;
+                items = items.concat(batch);
+                if (batch.length < 100) break;
+                page++;
+                if (page > 10) break; // safety
+            }
             const virtualClinicals = await fetchClinicalVirtualItems();
             return [...items, ...virtualClinicals];
         } catch (error) {
@@ -130,8 +145,15 @@
     }
 
     // For each clinical course the user has scheduled, pull undated assignments
-    // matching "Clinical Day N" and assign virtual dates evenly across 21 days
-    // starting at the user-provided start date.
+    // and assign virtual dates evenly across 21 days starting at the user-provided
+    // start date. Two modes:
+    //   1) "Clinical Day N" pattern matches — preferred (we know the day order).
+    //      Duplicates by day number are deduped (Canvas sometimes returns the same
+    //      Clinical Day N quiz under two assignment IDs).
+    //   2) Fallback: if no "Clinical Day N" items exist, use ALL undated
+    //      assignments in the course (keeps stable order via assignment ID).
+    //      This covers courses like Psych Clinical where work is named differently
+    //      (Typhon Time Logs, Video Case Studies, etc.).
     async function fetchClinicalVirtualItems() {
         const schedules = userSettings.clinicalSchedules || {};
         if (!Object.keys(schedules).length) return [];
@@ -149,24 +171,45 @@
                 assignments = await r.json();
             } catch (_) { continue; }
 
-            // Pick dateless "Clinical Day N" assignments (case insensitive)
-            const clinicalDays = [];
+            // First pass: try "Clinical Day N" pattern matches
+            const clinicalDaysMap = new Map(); // dayNum -> assignment (dedupe)
             assignments.forEach(a => {
                 if (a.due_at) return;
                 const m = (a.name || '').match(/clinical\s*day\s*(\d+)/i);
                 if (!m) return;
-                clinicalDays.push({ dayNum: parseInt(m[1], 10), assignment: a });
+                const dayNum = parseInt(m[1], 10);
+                // Dedupe: prefer the assignment with the lower ID (the original)
+                const existing = clinicalDaysMap.get(dayNum);
+                if (!existing || a.id < existing.id) {
+                    clinicalDaysMap.set(dayNum, a);
+                }
             });
-            if (!clinicalDays.length) continue;
 
-            clinicalDays.sort((a, b) => a.dayNum - b.dayNum);
+            let scheduled = []; // [{label, assignment}]
+
+            if (clinicalDaysMap.size) {
+                // Mode 1: "Clinical Day N" — preferred
+                const sortedDays = [...clinicalDaysMap.keys()].sort((a, b) => a - b);
+                scheduled = sortedDays.map(dayNum => ({
+                    assignment: clinicalDaysMap.get(dayNum)
+                }));
+            } else {
+                // Mode 2 (fallback): no "Clinical Day N" items — use ALL undated
+                // assignments for this course, in stable assignment-ID order.
+                scheduled = assignments
+                    .filter(a => !a.due_at)
+                    .sort((x, y) => x.id - y.id)
+                    .map(a => ({ assignment: a }));
+            }
+
+            if (!scheduled.length) continue;
 
             // Spread across a 21-day window starting at startDate
             const start = new Date(sched.startDate + 'T12:00:00');
-            const count = clinicalDays.length;
+            const count = scheduled.length;
             const spanDays = 20; // 21-day window = 0..20
 
-            clinicalDays.forEach((cd, idx) => {
+            scheduled.forEach((cd, idx) => {
                 const offset = count === 1 ? 0 : Math.round((idx * spanDays) / (count - 1));
                 const virtualDate = new Date(start);
                 virtualDate.setDate(virtualDate.getDate() + offset);
@@ -436,18 +479,23 @@
             filteredTasks = filteredTasks.filter(t => !completedIds.includes(t.clean_id) && new Date(t.plannable_date) < now);
         }
 
-        // Timeframe window (Sunday-anchored for 'this_week' / 'next_week')
-        const { start: tfStart, end: tfEnd } = getTimeframeWindow(userSettings.timeframe);
-        if (tfStart || tfEnd) {
-            filteredTasks = filteredTasks.filter(t => {
-                const d = new Date(t.plannable_date);
-                if (tfStart && d < tfStart) return false;
-                if (tfEnd && d > tfEnd) return false;
-                return true;
-            });
-        }
+        // When viewing completed tasks, ignore the timeframe / course filters.
+        // Rationale: you may mark a task done that was due last week or in a
+        // different course — you still want to see it in your "Done" history.
+        if (userSettings.status !== 'complete') {
+            // Timeframe window (Sunday-anchored for 'this_week' / 'next_week')
+            const { start: tfStart, end: tfEnd } = getTimeframeWindow(userSettings.timeframe);
+            if (tfStart || tfEnd) {
+                filteredTasks = filteredTasks.filter(t => {
+                    const d = new Date(t.plannable_date);
+                    if (tfStart && d < tfStart) return false;
+                    if (tfEnd && d > tfEnd) return false;
+                    return true;
+                });
+            }
 
-        if (userSettings.course !== 'All') filteredTasks = filteredTasks.filter(t => t.clean_course_name === userSettings.course);
+            if (userSettings.course !== 'All') filteredTasks = filteredTasks.filter(t => t.clean_course_name === userSettings.course);
+        }
 
         filteredTasks.sort((a, b) => {
             if (userSettings.sort === 'date_asc') return new Date(a.plannable_date) - new Date(b.plannable_date);
